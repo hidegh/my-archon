@@ -108,6 +108,7 @@ export {
   type RepoConfig,
   type MergedConfig,
   type SafeConfig,
+  type SlackConfig,
 } from './config/config-types';
 
 export {

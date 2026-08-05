@@ -67,6 +67,7 @@ import { IsolationBlockedError } from '@archon/isolation';
 import {
   buildOrchestratorSystemAppend,
   buildRunManagementSection,
+  buildMessageOriginSection,
   formatWorkflowContextSection,
 } from './prompt-builder';
 import type { WorkflowResultContext } from './prompt-builder';
@@ -1135,6 +1136,8 @@ export async function handleMessage(
     isolationHints,
     attachedFiles,
     userId,
+    codebaseId,
+    origin,
   } = context ?? {};
   try {
     getLog().debug({ conversationId, userId }, 'orchestrator_message_received');
@@ -1145,10 +1148,13 @@ export async function handleMessage(
     // execution identity; each turn's prefs/credentials resolve from the
     // SENDER when the adapter supplied one (see executionUserId below).
     // Per-message attribution happens on workflow_runs.
+    // codebaseId is likewise a CREATION-ONLY default (e.g. resolved from the
+    // Slack channel → project map): getOrCreateConversation returns an existing
+    // row untouched, so `/setproject` later in the thread still overrides it.
     let conversation = await db.getOrCreateConversation(
       platform.getPlatformType(),
       conversationId,
-      undefined,
+      codebaseId,
       parentConversationId,
       userId
     );
@@ -1598,6 +1604,13 @@ export async function handleMessage(
     // Claude supports the preset object for prompt caching; other providers
     // need a plain string (Pi coerces non-string to undefined, Codex ignores it).
     let systemAppend = buildOrchestratorSystemAppend(conversation, codebases, workflows);
+    // Tell the assistant where it is being spoken to, when the adapter could
+    // describe it (Slack today). Nothing else in the prompt carries platform
+    // context. Every field is stable per conversation, so this stays safe
+    // inside Claude's cacheable append below.
+    if (origin) {
+      systemAppend += `\n\n${buildMessageOriginSection(origin, conversation.platform_type)}`;
+    }
     // Capabilities are only consulted for project-scoped chats (both the native tool
     // and the CLI pointer are scoped features), so look them up lazily — this also
     // avoids a registry lookup (and a throw for an unregistered provider) on the

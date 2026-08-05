@@ -67,6 +67,8 @@ Archon uses **Socket Mode** for Slack integration, which means:
    - `commands` -- Required for the `/archon` and `/archon-workflow` slash commands
    - `users:read` -- Look up real names via `users.info` for user attribution. The adapter degrades gracefully if this scope is missing (real names won't appear in the Archon DB, but messages still flow); a one-time `slack.users_info_missing_scope` warning surfaces the misconfiguration in the server log.
    - `files:read` -- **Required to read file attachments.** Without it Archon cannot download files dropped in a message, and it answers as though no file were attached. Failed downloads log a one-time `slack.files_read_missing_scope` warning plus a per-file `slack.attachment_download_failed`; messages themselves are unaffected. See [File Attachments](#file-attachments).
+   - `channels:read` -- Resolve public channel **names** via `conversations.info`. Needed for [channel → project mapping](#map-a-channel-to-a-project-optional) whenever `slack.useChannelName` is left at its default (`true`). Degrades gracefully if missing: a one-time `slack.channel_info_missing_scope` warning is logged and channels simply stay unmapped.
+   - `groups:read` -- The same lookup for private channels.
 
 ## Step 4: Subscribe to Events
 
@@ -154,6 +156,94 @@ SLACK_STREAMING_MODE=batch  # batch (default) | stream
 ```
 
 For streaming mode details, see [Configuration](/getting-started/configuration/).
+
+## Map a Channel to a Project (Optional)
+
+Teams usually keep one Slack channel per project. Map them once and every **new
+thread** in that channel is bound to the right project automatically -- no
+`/setproject` needed.
+
+This lives in **global** config (`~/.archon/config.yaml`) only: a channel routing
+table is a workspace-wide concern, and it is what *selects* the project, so it
+cannot be read from a project's own repo config.
+
+**Restart required.** Archon reads `~/.archon/config.yaml` once and caches it in
+memory for the life of the server process (true of all global config, not just
+this block). After hand-editing `slack:`, restart the Archon server for the
+change to take effect -- editing the file alone does not update a running
+instance.
+
+```yaml
+slack:
+  useChannelName: true # key channelProjects by name (default) or by channel ID
+  autoSetProject: true # auto-bind new threads in a mapped channel (default)
+  channelProjects:
+    ai-web-project: web # <channel name or ID>: <registered project name>
+    ai-biz-project: biz
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `useChannelName` | `true` | Key `channelProjects` by channel **name** (no leading `#`). Requires `channels:read` + `groups:read`, since Slack events carry only the channel ID. Set `false` to key by channel **ID** instead -- no extra scopes, no API call. |
+| `autoSetProject` | `true` | Whether a mapping actually binds a new conversation. Set `false` to keep the table without it changing which project a thread starts on. |
+| `channelProjects` | -- | The map itself. Values are registered project names, the same ones used with `/register-project <name> <path>` and `/setproject <name>`. |
+
+**Semantics:**
+
+- **Creation only.** A mapping is the *default* for a brand-new thread. An
+  explicit `/setproject` later in the same thread always wins, and threads that
+  already existed before you added the mapping are left alone.
+- **Fails soft.** If a mapped project isn't registered (a typo, or you register
+  it later), the conversation is created unbound and a
+  `slack.channel_project_mapping_unresolved` warning is logged. It never blocks
+  the message.
+- **Name keys are matched case-insensitively;** channel IDs are matched exactly,
+  because Slack IDs are case-sensitive.
+- **Renamed channels keep their cached name until Archon restarts.** With
+  `useChannelName: true`, a channel's resolved name is cached for the process
+  lifetime -- if it's renamed after that first lookup, Archon keeps matching
+  the *old* name against `channelProjects` (never blocking, but not what you'd
+  expect from just updating the map). Restart Archon after a rename, or key by
+  ID if you rename channels often.
+- **Config changes need a restart** -- see above. This is not specific to
+  `channelProjects`; it applies to every setting in global config.
+
+Finding a channel ID: in Slack, open the channel, click its name, and copy the
+ID at the bottom of the dialog (it looks like `C01ABC234DE`).
+
+## Channel Awareness
+
+Archon knows which channel it is being spoken to in, so you can just ask:
+
+```text
+@archon what Slack channel am I in?
+```
+
+It answers with the channel **ID** always, and the channel **name** when
+`slack.useChannelName` is `true` (the default). With `useChannelName: false`
+the name is reported as `N/A` -- Archon never looked it up, which is exactly
+what that setting asks for.
+
+This needs no configuration; it works out of the box on every Slack install.
+The only thing that changes it is the `slack.useChannelName` flag above.
+
+When a name cannot be produced, Archon says `N/A` and explains why, so a
+misconfiguration doesn't look like the feature is simply off:
+
+| Situation | What Archon reports |
+| --- | --- |
+| Name resolved | The channel name |
+| `useChannelName: false` | `N/A` (resolution disabled) |
+| Missing `channels:read` / `groups:read` | `N/A` (could not be resolved -- scope hint) |
+| Direct message | `N/A` (DMs have no channel name) |
+
+:::note
+With the default `useChannelName: true`, Archon calls `conversations.info` once
+per channel (cached for the life of the process). Without the `channels:read` /
+`groups:read` scopes this logs a single `slack.channel_info_missing_scope`
+warning and channel names read as `N/A` -- messages are unaffected. Set
+`useChannelName: false` to skip the lookup entirely.
+:::
 
 ## Usage
 
@@ -293,6 +383,23 @@ file were attached at all, with no notice:
 3. **Check `slack.attachments_downloaded`** -- it logs `requested`, `saved`
    and `skipped` per message, which tells you immediately whether Archon saw
    the file at all versus failed to fetch it.
+
+### Channel → Project Mapping Not Applying
+
+Check, in order:
+
+1. **Scopes.** `channels:read` (public) / `groups:read` (private) are required
+   while `useChannelName` is `true`. A `slack.channel_info_missing_scope`
+   warning in the server log means the name lookup is failing -- add the scopes
+   and reinstall the app. Or set `useChannelName: false` and key the map by
+   channel ID instead, which needs no extra scopes.
+2. **The thread is new.** Mappings apply only when a conversation is created.
+   Start a fresh top-level message rather than replying in an existing thread.
+3. **The project name matches.** A `slack.channel_project_mapping_unresolved`
+   warning means the channel resolved but the project name in the map isn't
+   registered. Project names are case-sensitive -- check `/status`.
+4. **The channel wasn't renamed.** With `useChannelName: true` the map is keyed
+   by the channel's *current* name.
 
 ## Security Recommendations
 

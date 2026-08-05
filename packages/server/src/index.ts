@@ -107,6 +107,7 @@ import type { IPlatformAdapter } from '@archon/core';
 import type { IdentityPlatform } from '@archon/core';
 import { unlink, rm } from 'node:fs/promises';
 import * as userDb from '@archon/core/db/users';
+import * as codebaseDb from '@archon/core/db/codebases';
 import {
   createLogger,
   logArchonPaths,
@@ -117,6 +118,7 @@ import {
 } from '@archon/paths';
 import { selectGitHubAuthMode, parseGitCredentialPath } from './github-auth-bootstrap';
 import { isDiscordMentionRequired } from './discord-mention';
+import { resolveSlackChannelContext } from './slack-channel-context';
 import {
   getAuth,
   closeAuth,
@@ -664,6 +666,38 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
           });
         }
 
+        // Resolve the channel → project mapping (global config). Best-effort:
+        // codebaseId is only a DEFAULT for a brand-new conversation, so an
+        // unmapped or unresolvable channel simply starts unbound, as before.
+        // Guarded: resolveSlackChannelContext awaits an injected DB call
+        // (findCodebaseByName) that is NOT wrapped internally (see its own
+        // doc comment) — an uncaught rejection here would escape this
+        // detached async callback entirely, bypassing both the lockManager's
+        // .catch() below and createMessageErrorHandler.
+        let channelContext: Awaited<ReturnType<typeof resolveSlackChannelContext>> = {};
+        try {
+          const slackConfig = (await loadConfig()).slack;
+          channelContext = await resolveSlackChannelContext(event.channel, slackConfig, {
+            resolveChannelName: id => slackAdapter.resolveChannelName(id),
+            findCodebaseByName: name => codebaseDb.findCodebaseByName(name),
+          });
+        } catch (error) {
+          getLog().warn(
+            { err: error as Error, channel: event.channel },
+            'slack.channel_context_failed'
+          );
+        }
+        if (channelContext.unresolvedProject) {
+          getLog().warn(
+            {
+              channel: event.channel,
+              channelName: channelContext.channelName,
+              projectName: channelContext.unresolvedProject,
+            },
+            'slack.channel_project_mapping_unresolved'
+          );
+        }
+
         // Fire-and-forget: handler returns immediately, processing happens async
         lockManager
           .acquireLock(conversationId, async () => {
@@ -674,6 +708,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
                 isolationHints: { workflowType: 'thread', workflowId: conversationId },
                 userId,
                 ...(attachedFiles.length > 0 ? { attachedFiles } : {}),
+                codebaseId: channelContext.codebaseId,
+                origin: {
+                  channelId: event.channel,
+                  channelName: channelContext.channelName,
+                  channelNameStatus: channelContext.channelNameStatus,
+                },
               });
             } finally {
               // Clean up downloaded attachments AFTER handleMessage completes so the
