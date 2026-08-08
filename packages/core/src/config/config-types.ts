@@ -226,6 +226,35 @@ export interface GlobalConfig {
    * (Distinct from `streaming.slack`, which only picks stream vs batch.)
    */
   slack?: SlackConfig;
+
+  /**
+   * Per-project message interception: `<registered project>: <workflow name>`.
+   *
+   * Every non-slash message in a conversation bound to a listed project goes
+   * straight to that workflow, bypassing the AI router. Projects not listed
+   * here are untouched and keep normal routing.
+   *
+   * Global-only, for the same reason as `slack.channelProjects`: the keys are
+   * install-level project names (the ones used with `/register-project <name>`
+   * and `/setproject <name>`), which a repo's own config cannot know — and
+   * folder projects have no repo to hold a config file at all.
+   *
+   * Platform-agnostic: enforced at the single `handleMessage` intake seam, so
+   * it applies identically to Slack, Telegram, Discord, GitHub, web, and CLI.
+   *
+   * Escape hatches, in precedence order:
+   *   1. `/command`  — slash commands route exactly as they do today
+   *   2. `?message`  — a leading `?` falls through to normal AI chat/routing
+   *
+   * A listed project whose workflow cannot be resolved is reported to the user,
+   * never silently fallen through to the AI router (Fail Fast — a config typo
+   * must not quietly restore the old behavior).
+   *
+   * @example
+   * dispatch:
+   *   hidegh/obsidian: obs_dispatcher
+   */
+  dispatch?: Record<string, string>;
 }
 
 /**
@@ -474,6 +503,13 @@ export interface MergedConfig {
    * so there is no repo-level merge for it.
    */
   slack?: SlackConfig;
+  /**
+   * Project → default-workflow interception table, passed through from global
+   * config. Undefined when nothing is configured (the overwhelmingly common
+   * case), which is what keeps the intake seam a single cheap check. Global-only
+   * by design, so there is no repo-level merge for it.
+   */
+  dispatch?: Record<string, string>;
 }
 
 /**

@@ -44,6 +44,7 @@ import {
   configureIsolation,
   getIsolationProvider,
 } from '@archon/isolation';
+import type { AttachedFile } from '../types';
 import * as db from '../db/conversations';
 import { createIsolationStore } from '../db/isolation-environments';
 import { toError } from '../utils/error';
@@ -283,6 +284,11 @@ export interface WorkflowRoutingContext {
    * to the privacy-safe "custom" treatment when not provided.
    */
   readonly source?: WorkflowSource;
+  /**
+   * Files that arrived with the triggering message. Forwarded to the run as the
+   * `ARCHON_ATTACHMENTS` env var for `bash:`/`script:` nodes.
+   */
+  readonly attachments?: readonly AttachedFile[];
 }
 
 /**
@@ -441,6 +447,7 @@ export async function dispatchBackgroundWorkflow(
             preCreatedRun,
             userId: ctx.userId,
             source: ctx.source,
+            attachments: ctx.attachments,
             baseBranch: codebaseBaseBranch,
           }
         );

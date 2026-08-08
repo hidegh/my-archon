@@ -230,6 +230,12 @@ const DEFAULT_CONFIG_CONTENT = `# Archon Global Configuration
 #   autoSetProject: true    # auto-bind new threads in a mapped channel to its project
 #   channelProjects:
 #     ai-web-project: web   # <slack channel name or ID>: <registered project name>
+
+# Per-project default workflow (global only, all platforms).
+# Every non-slash message in a conversation bound to a listed project runs that
+# workflow instead of the AI router. Prefix a message with ? to ask the AI instead.
+# dispatch:
+#   hidegh/obsidian: obs_dispatcher   # <registered project name>: <workflow name>
 `;
 
 /**
@@ -527,6 +533,13 @@ function mergeGlobalConfig(defaults: MergedConfig, global: GlobalConfig): Merged
   // so there is no matching branch in mergeRepoConfig.
   if (global.slack) {
     result.slack = { ...global.slack };
+  }
+
+  // Project → default-workflow interception table. Global-only by design (the
+  // keys are install-level project names), so there is no matching branch in
+  // mergeRepoConfig.
+  if (global.dispatch) {
+    result.dispatch = { ...global.dispatch };
   }
 
   return result;
